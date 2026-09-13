@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zomiko Admin</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700;800&family=Mukta:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{ --mustard:#D9A62E; --maroon:#7A2E2E; --paper:#F5EEDD; --leaf:#3B5D3B; --terracotta:#C1613D; --ink:#2B2420; }
+  body{ font-family:'Mukta',sans-serif; background:var(--paper); color:var(--ink); }
+  .signboard{ font-family:'Baloo 2', sans-serif; }
+  .card{ border:3px solid var(--ink); border-radius:4px 16px 4px 16px; background:#fff; box-shadow:4px 4px 0 var(--ink); }
+  .btn{ background:var(--maroon); color:var(--paper); border-radius:4px 12px 4px 12px; box-shadow:3px 3px 0 var(--ink); font-weight:700; }
+  .btn:active{ transform:translate(2px,2px); box-shadow:1px 1px 0 var(--ink); }
+  .btn-ghost{ border:2px solid var(--ink); border-radius:4px 12px 4px 12px; font-weight:700; }
+  .btn-danger{ background:#8a3a3a; color:#fff; border-radius:4px 12px 4px 12px; font-weight:700; }
+  .tab{ border-bottom:3px solid transparent; font-weight:700; padding:8px 4px; white-space:nowrap; }
+  .tab.active{ border-color:var(--maroon); color:var(--maroon); }
+  input,textarea,select{ font-family:'Mukta',sans-serif; }
+  ::-webkit-scrollbar{ display:none; }
+  .fade-in{ animation: fadeIn .2s ease-out; } @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+  .toast{ animation: slideDown .3s ease-out; }
+  @keyframes slideDown{ from{transform:translateY(-100%); opacity:0;} to{transform:translateY(0); opacity:1;} }
+  .status-pill{ font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<div id="app" class="max-w-lg mx-auto min-h-screen pb-10"></div>
+<div id="toastHost" class="fixed top-0 left-0 right-0 z-50 flex flex-col items-center gap-2 pt-3 pointer-events-none"></div>
+
+<script>
+// ====== SUPABASE CONFIG — same project as the customer site ======
+const SUPABASE_URL = "https://ymefblzliyfxdchbhcqg.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InltZWZibHpsaXlmeGRjaGJoY3FnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxOTIwMzYsImV4cCI6MjEwNDc2ODAzNn0.HglqglJGU4wddt_LkDjVWlrCOhua14NMX7rFqPnPy2c";
+// ====================================================================
+
+let supabase = null;
+let libraryLoaded = typeof window.supabase !== 'undefined';
+if(libraryLoaded){
+  try{ supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); }
+  catch(e){ console.error(e); libraryLoaded = false; }
+}
+
+let session = null;
+let isAdmin = false;
+let currentTab = 'dashboard';
+let restaurants = [];
+let categories = [];
+let menuItems = [];
+let selectedRestaurantId = null;
+let ordersCache = [];
+let orderChannel = null;
+let audioCtx = null;
+
+function beep(){
+  try{
+    audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.frequency.value = 880; g.gain.value = 0.15;
+    o.start(); setTimeout(()=>{ o.frequency.value = 1160; }, 120); setTimeout(()=>{ o.stop(); }, 320);
+  }catch(e){}
+}
+
+function toast(msg, kind){
+  const el = document.createElement('div');
+  el.className = 'toast card px-4 py-2 font-bold text-sm ' + (kind==='error' ? 'text-red-800' : '');
+  el.style.background = kind==='error' ? '#fdecec' : '#fff';
+  el.textContent = msg;
+  document.getElementById('toastHost').appendChild(el);
+  setTimeout(()=>el.remove(), 4000);
+}
+
+// ---------------- auth ----------------
+async function init(){
+  if(!libraryLoaded){
+    document.getElementById('app').innerHTML = `<div class="min-h-screen flex items-center justify-center px-6 text-center">
+      <div class="card p-6"><h2 class="signboard text-xl font-bold mb-2">Connection too slow</h2>
+      <p class="text-sm opacity-70 mb-3">Some files couldn't load. Check your internet and try again.</p>
+      <button onclick="location.reload()" class="btn px-4 py-2">Retry</button></div></div>`;
+    return;
+  }
+  const { data } = await supabase.auth.getSession();
+  session = data.session;
+  if(session){
+    isAdmin = await checkAdmin();
+    if(!isAdmin){ await supabase.auth.signOut(); session = null; }
+  }
+  render();
+  if(isAdmin) startOrderWatch();
+}
+
+async function checkAdmin(){
+  try{
+    const { data, error } = await supabase.from('admins').select('user_id').eq('user_id', session.user.id);
+    return !error && data && data.length > 0;
+  }catch(e){ return false; }
+}
+
+async function login(){
+  const email = document.getElementById('loginEmail').value.trim();
+  const pass = document.getElementById('loginPass').value;
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = '';
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password: pass });
+  if(error){ errEl.textContent = 'Login failed: ' + error.message; return; }
+  session = data.session;
+  isAdmin = await checkAdmin();
+  if(!isAdmin){ errEl.textContent = 'This account is not an admin.'; await supabase.auth.signOut(); session=null; return; }
+  await loadAll();
+  render();
+  startOrderWatch();
+}
+
+async function logout(){
+  await supabase.auth.signOut();
+  session = null; isAdmin = false;
+  if(orderChannel){ supabase.removeChannel(orderChannel); orderChannel=null; }
+  render();
+}
+
+// ---------------- data loading ----------------
+async function loadAll(){
+  const [{data:r}, {data:c}, {data:m}] = await Promise.all([
+    supabase.from('restaurants').select('*').order('id'),
+    supabase.from('categories').select('*').order('sort_order'),
+    supabase.from('menu_items').select('*').order('id'),
+  ]);
+  restaurants = r||[]; categories = c||[]; menuItems = m||[];
+  if(!selectedRestaurantId && restaurants.length) selectedRestaurantId = restaurants[0].id;
+  await loadOrders();
+}
+
+async function loadOrders(){
+  const { data } = await supabase.from('orders').select('*, order_items(*)').order('created_at', { ascending:false }).limit(100);
+  ordersCache = data||[];
+}
+
+function startOrderWatch(){
+  if(orderChannel) return;
+  orderChannel = supabase.channel('admin-orders')
+    .on('postgres_changes', { event:'INSERT', schema:'public', table:'orders' }, payload => {
+      beep();
+      toast('🆕 New order ' + payload.new.order_code + ' · ₹' + payload.new.total, 'new');
+      if('Notification' in window && Notification.permission === 'granted'){
+        new Notification('Zomiko — New order', { body: payload.new.order_code + ' · ₹' + payload.new.total });
+      }
+      loadOrders().then(()=>{ if(currentTab==='orders' || currentTab==='dashboard') render(); });
+    })
+    .subscribe();
+  if('Notification' in window && Notification.permission === 'default'){ Notification.requestPermission(); }
+}
+
+// ---------------- shell ----------------
+function goTab(t){ currentTab = t; render(); }
+
+function render(){
+  const app = document.getElementById('app');
+  if(!session || !isAdmin){ app.innerHTML = loginHtml(); return; }
+  app.innerHTML = `
+    <header class="px-5 pt-6 pb-3 flex items-center justify-between">
+      <div>
+        <h1 class="signboard text-2xl font-extrabold" style="color:var(--maroon)">Zomiko Admin</h1>
+        <p class="text-xs opacity-60">${session.user.email}</p>
+      </div>
+      <button onclick="logout()" class="btn-ghost text-xs px-3 py-1.5">Logout</button>
+    </header>
+    <nav class="flex gap-4 px-5 border-b-2 border-[var(--ink)]/20 overflow-x-auto">
+      ${tabBtn('dashboard','Dashboard')}${tabBtn('orders','Orders')}${tabBtn('restaurants','Restaurants')}${tabBtn('categories','Categories')}${tabBtn('menu','Menu')}${tabBtn('settings','Settings')}
+    </nav>
+    <main class="px-5 py-4 fade-in" id="tabContent"></main>
+  `;
+  const c = document.getElementById('tabContent');
+  if(currentTab==='dashboard') c.innerHTML = dashboardHtml();
+  else if(currentTab==='orders') c.innerHTML = ordersHtml();
+  else if(currentTab==='restaurants') c.innerHTML = restaurantsHtml();
+  else if(currentTab==='categories') c.innerHTML = categoriesHtml();
+  else if(currentTab==='menu') c.innerHTML = menuHtml();
+  else if(currentTab==='settings') settingsHtml().then(h=>c.innerHTML=h);
+}
+function tabBtn(key,label){ return `<button onclick="goTab('${key}')" class="tab ${currentTab===key?'active':''}">${label}</button>`; }
+
+function loginHtml(){
+  return `
+  <div class="min-h-screen flex items-center justify-center px-6">
+    <div class="card p-6 w-full max-w-sm">
+      <h1 class="signboard text-3xl font-extrabold text-center mb-1" style="color:var(--maroon)">Zomiko</h1>
+      <p class="text-center text-sm opacity-70 mb-4">Admin login</p>
+      <input id="loginEmail" type="email" placeholder="Email" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2 mb-2">
+      <input id="loginPass" type="password" placeholder="Password" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2 mb-3">
+      <button onclick="login()" class="btn w-full py-2.5">Login</button>
+      <p id="loginError" class="text-sm font-semibold text-center mt-3" style="color:#8a3a3a"></p>
+    </div>
+  </div>`;
+}
+
+// ---------------- dashboard ----------------
+function dashboardHtml(){
+  const todayStr = new Date().toDateString();
+  const todays = ordersCache.filter(o => new Date(o.created_at).toDateString()===todayStr);
+  const sales = todays.reduce((s,o)=>s+Number(o.total||0),0);
+  const pending = ordersCache.filter(o=>!['delivered','cancelled'].includes(o.status)).length;
+  const completed = ordersCache.filter(o=>o.status==='delivered').length;
+  const cancelled = ordersCache.filter(o=>o.status==='cancelled').length;
+  const activeRestaurants = restaurants.filter(r=>r.is_active).length;
+  const popular = menuItems.filter(m=>m.is_popular);
+
+  return `
+  <div class="grid grid-cols-2 gap-3 mb-4">
+    ${statCard("Today's orders", todays.length)}
+    ${statCard("Today's sales", '₹'+sales)}
+    ${statCard('Pending', pending)}
+    ${statCard('Completed', completed)}
+    ${statCard('Cancelled', cancelled)}
+    ${statCard('Active stalls', activeRestaurants)}
+  </div>
+  <div class="card p-4">
+    <h3 class="signboard font-bold mb-2">Popular items</h3>
+    ${popular.length ? popular.map(p=>`<p class="text-sm py-1 border-b border-dashed border-[var(--ink)]/20">${p.name} — ₹${p.price}</p>`).join('') : '<p class="text-sm opacity-60">None marked popular yet.</p>'}
+  </div>`;
+}
+function statCard(label,val){ return `<div class="card p-3"><p class="text-xs opacity-60 font-semibold">${label}</p><p class="signboard text-2xl font-extrabold">${val}</p></div>`; }
+
+// ---------------- orders ----------------
+const STATUS_FLOW = ['placed','accepted','preparing','ready','out_for_delivery','delivered'];
+const STATUS_LABEL = { placed:'Placed', accepted:'Accepted', preparing:'Preparing', ready:'Ready', out_for_delivery:'Out for delivery', delivered:'Delivered', cancelled:'Cancelled' };
+
+function ordersHtml(){
+  if(ordersCache.length===0) return `<p class="text-sm opacity-60">No orders yet.</p>`;
+  return `<div class="space-y-3">` + ordersCache.map(o=>{
+    const restaurant = restaurants.find(r=>r.id===o.restaurant_id);
+    const nextIdx = STATUS_FLOW.indexOf(o.status);
+    const nextStatus = nextIdx>=0 && nextIdx<STATUS_FLOW.length-1 ? STATUS_FLOW[nextIdx+1] : null;
+    const isFinal = o.status==='delivered' || o.status==='cancelled';
+    return `
+    <div class="card p-3">
+      <div class="flex justify-between items-start">
+        <div>
+          <p class="font-bold">${o.order_code} <span class="status-pill" style="background:var(--mustard)">${STATUS_LABEL[o.status]}</span></p>
+          <p class="text-xs opacity-70">${restaurant ? restaurant.name : ''} · ${new Date(o.created_at).toLocaleString()}</p>
+        </div>
+        <p class="font-bold">₹${o.total}</p>
+      </div>
+      <p class="text-sm mt-2">${o.customer_name} · ${o.phone}</p>
+      <p class="text-sm opacity-70">${o.address}</p>
+      <p class="text-xs opacity-60 mt-1">${(o.order_items||[]).map(it=>it.quantity+'× '+it.item_name).join(', ')}</p>
+      <p class="text-xs opacity-60">Payment: ${o.payment_method==='cod'?'Cash on delivery':'UPI'} (${o.payment_status})</p>
+      <div class="flex gap-2 mt-3 flex-wrap">
+        ${!isFinal && nextStatus ? `<button onclick="setOrderStatus(${o.id},'${nextStatus}')" class="btn text-xs px-3 py-1.5">Mark ${STATUS_LABEL[nextStatus]}</button>` : ''}
+        ${!isFinal ? `<button onclick="setOrderStatus(${o.id},'cancelled')" class="btn-danger text-xs px-3 py-1.5">Cancel</button>` : ''}
+      </div>
+    </div>`;
+  }).join('') + `</div>`;
+}
+
+async function setOrderStatus(orderId, status){
+  const { error } = await supabase.from('orders').update({ status }).eq('id', orderId);
+  if(error){ toast('Failed: '+error.message, 'error'); return; }
+  await loadOrders(); render();
+}
+
+// ---------------- restaurants ----------------
+function restaurantsHtml(){
+  return `
+  <div class="card p-4 mb-4">
+    <h3 class="signboard font-bold mb-2">Add restaurant</h3>
+    <div class="space-y-2">
+      <input id="r_name" placeholder="Name" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <input id="r_desc" placeholder="Description / specialty" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <input id="r_address" placeholder="Address" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <input id="r_phone" placeholder="Phone" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <div class="flex gap-2">
+        <input id="r_open" type="time" class="w-1/2 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+        <input id="r_close" type="time" class="w-1/2 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      </div>
+      <div class="flex gap-2">
+        <input id="r_delivery" type="number" placeholder="Delivery charge ₹" class="w-1/2 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+        <input id="r_minorder" type="number" placeholder="Minimum order ₹" class="w-1/2 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      </div>
+      <input id="r_prep" type="number" placeholder="Prep time (minutes)" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <input id="r_logo" placeholder="Logo image URL (optional)" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <button onclick="addRestaurant()" class="btn w-full py-2">Add restaurant</button>
+    </div>
+  </div>
+  <div class="space-y-3">
+    ${restaurants.map(r=>`
+      <div class="card p-3">
+        <div class="flex justify-between items-center">
+          <p class="font-bold">${r.name}</p>
+          <div class="flex gap-2">
+            <button onclick="toggleRestaurant(${r.id},'is_open',${!r.is_open})" class="btn-ghost text-xs px-2 py-1">${r.is_open?'Mark closed':'Mark open'}</button>
+            <button onclick="toggleRestaurant(${r.id},'is_active',${!r.is_active})" class="btn-ghost text-xs px-2 py-1">${r.is_active?'Disable':'Enable'}</button>
+          </div>
+        </div>
+        <p class="text-xs opacity-60">${r.description||''} · Delivery ₹${r.delivery_charge||0} · Min order ₹${r.minimum_order_amount||0}</p>
+        <button onclick="deleteRestaurant(${r.id})" class="text-xs underline opacity-60 mt-1">Delete restaurant</button>
+      </div>
+    `).join('') || '<p class="text-sm opacity-60">No restaurants yet.</p>'}
+  </div>`;
+}
+
+async function addRestaurant(){
+  const payload = {
+    name: val('r_name'), description: val('r_desc'), address: val('r_address'), phone: val('r_phone'),
+    opening_time: val('r_open')||null, closing_time: val('r_close')||null,
+    delivery_charge: parseFloat(val('r_delivery'))||0, minimum_order_amount: parseFloat(val('r_minorder'))||0,
+    prep_time_minutes: parseInt(val('r_prep'))||20, logo_url: val('r_logo')||null,
+  };
+  if(!payload.name){ toast('Name required','error'); return; }
+  const { error } = await supabase.from('restaurants').insert(payload);
+  if(error){ toast('Failed: '+error.message,'error'); return; }
+  await loadAll(); render();
+}
+async function toggleRestaurant(id, field, value){
+  const { error } = await supabase.from('restaurants').update({ [field]: value }).eq('id', id);
+  if(error){ toast('Failed: '+error.message,'error'); return; }
+  await loadAll(); render();
+}
+async function deleteRestaurant(id){
+  if(!confirm('Delete this restaurant and its full menu?')) return;
+  await supabase.from('menu_items').delete().eq('restaurant_id', id);
+  await supabase.from('categories').delete().eq('restaurant_id', id);
+  await supabase.from('restaurants').delete().eq('id', id);
+  await loadAll(); render();
+}
+function val(id){ return document.getElementById(id).value.trim(); }
+
+// ---------------- categories ----------------
+function categoriesHtml(){
+  const cats = categories.filter(c=>c.restaurant_id===selectedRestaurantId);
+  return `
+  <div class="mb-3">
+    <label class="text-sm font-semibold block mb-1">Restaurant</label>
+    <select onchange="selectedRestaurantId=Number(this.value); render()" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      ${restaurants.map(r=>`<option value="${r.id}" ${r.id===selectedRestaurantId?'selected':''}>${r.name}</option>`).join('')}
+    </select>
+  </div>
+  <div class="card p-4 mb-4">
+    <h3 class="signboard font-bold mb-2">Add category</h3>
+    <div class="flex gap-2">
+      <input id="cat_name" placeholder="e.g. Thali, Snacks" class="flex-1 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <button onclick="addCategory()" class="btn px-4">Add</button>
+    </div>
+  </div>
+  <div class="space-y-2">
+    ${cats.map(c=>`
+      <div class="card p-3 flex justify-between items-center">
+        <span class="font-semibold">${c.name} ${!c.is_active?'<span class=\"opacity-50 text-xs\">(disabled)</span>':''}</span>
+        <div class="flex gap-2">
+          <button onclick="toggleCategory(${c.id},${!c.is_active})" class="btn-ghost text-xs px-2 py-1">${c.is_active?'Disable':'Enable'}</button>
+          <button onclick="deleteCategory(${c.id})" class="text-xs underline opacity-60">Delete</button>
+        </div>
+      </div>
+    `).join('') || '<p class="text-sm opacity-60">No categories yet for this restaurant.</p>'}
+  </div>`;
+}
+async function addCategory(){
+  const name = val('cat_name');
+  if(!name || !selectedRestaurantId){ toast('Pick a restaurant and enter a name','error'); return; }
+  const sort_order = categories.filter(c=>c.restaurant_id===selectedRestaurantId).length;
+  const { error } = await supabase.from('categories').insert({ restaurant_id: selectedRestaurantId, name, sort_order });
+  if(error){ toast('Failed: '+error.message,'error'); return; }
+  await loadAll(); render();
+}
+async function toggleCategory(id, value){
+  await supabase.from('categories').update({ is_active: value }).eq('id', id);
+  await loadAll(); render();
+}
+async function deleteCategory(id){
+  if(!confirm('Delete this category?')) return;
+  await supabase.from('categories').delete().eq('id', id);
+  await loadAll(); render();
+}
+
+// ---------------- menu items ----------------
+function menuHtml(){
+  const cats = categories.filter(c=>c.restaurant_id===selectedRestaurantId);
+  const items = menuItems.filter(m=>m.restaurant_id===selectedRestaurantId);
+  return `
+  <div class="mb-3">
+    <label class="text-sm font-semibold block mb-1">Restaurant</label>
+    <select onchange="selectedRestaurantId=Number(this.value); render()" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      ${restaurants.map(r=>`<option value="${r.id}" ${r.id===selectedRestaurantId?'selected':''}>${r.name}</option>`).join('')}
+    </select>
+  </div>
+  <div class="card p-4 mb-4">
+    <h3 class="signboard font-bold mb-2">Add menu item</h3>
+    <div class="space-y-2">
+      <input id="m_name" placeholder="Item name" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <select id="m_cat" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+        <option value="">No category</option>
+        ${cats.map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}
+      </select>
+      <input id="m_desc" placeholder="Description (optional)" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      <div class="flex gap-2">
+        <input id="m_price" type="number" placeholder="Price ₹" class="w-1/2 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+        <input id="m_prep" type="number" placeholder="Prep mins" class="w-1/2 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      </div>
+      <div class="flex gap-2">
+        <input id="m_min" type="number" placeholder="Min quantity" value="1" class="w-1/2 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+        <input id="m_max" type="number" placeholder="Max quantity (optional)" class="w-1/2 border-2 border-[var(--ink)] rounded-lg px-3 py-2">
+      </div>
+      <label class="flex items-center gap-2 text-sm font-semibold"><input id="m_veg" type="checkbox" checked> Vegetarian</label>
+      <label class="flex items-center gap-2 text-sm font-semibold"><input id="m_popular" type="checkbox"> Mark as popular</label>
+      <button onclick="addMenuItem()" class="btn w-full py-2">Add item</button>
+    </div>
+  </div>
+  <div class="space-y-2">
+    ${items.map(m=>`
+      <div class="card p-3">
+        <div class="flex justify-between items-center">
+          <p class="font-semibold">${m.name} — ₹${m.price} ${m.is_popular?'★':''}</p>
+          <span class="text-xs opacity-60">${m.is_veg?'Veg':'Non-veg'}</span>
+        </div>
+        <p class="text-xs opacity-60">Min ${m.min_quantity}${m.max_quantity?', max '+m.max_quantity:''} · ${m.is_available?'Available':'Unavailable'}</p>
+        <div class="flex gap-2 mt-2">
+          <button onclick="toggleItem(${m.id},'is_available',${!m.is_available})" class="btn-ghost text-xs px-2 py-1">${m.is_available?'Mark unavailable':'Mark available'}</button>
+          <button onclick="toggleItem(${m.id},'is_popular',${!m.is_popular})" class="btn-ghost text-xs px-2 py-1">${m.is_popular?'Unmark popular':'Mark popular'}</button>
+          <button onclick="deleteMenuItem(${m.id})" class="text-xs underline opacity-60">Delete</button>
+        </div>
+      </div>
+    `).join('') || '<p class="text-sm opacity-60">No items yet for this restaurant.</p>'}
+  </div>`;
+}
+async function addMenuItem(){
+  const payload = {
+    restaurant_id: selectedRestaurantId,
+    category_id: val('m_cat') ? Number(val('m_cat')) : null,
+    name: val('m_name'), description: val('m_desc')||null,
+    price: parseFloat(val('m_price')), prep_time_minutes: parseInt(val('m_prep'))||15,
+    min_quantity: parseInt(val('m_min'))||1, max_quantity: val('m_max') ? parseInt(val('m_max')) : null,
+    is_veg: document.getElementById('m_veg').checked, is_popular: document.getElementById('m_popular').checked,
+  };
+  if(!payload.name || !payload.price){ toast('Name and price required','error'); return; }
+  const { error } = await supabase.from('menu_items').insert(payload);
+  if(error){ toast('Failed: '+error.message,'error'); return; }
+  await loadAll(); render();
+}
+async function toggleItem(id, field, value){
+  await supabase.from('menu_items').update({ [field]: value }).eq('id', id);
+  await loadAll(); render();
+}
+async function deleteMenuItem(id){
+  if(!confirm('Delete this item?')) return;
+  await supabase.from('menu_items').delete().eq('id', id);
+  await loadAll(); render();
+}
+
+// ---------------- settings ----------------
+async function settingsHtml(){
+  const { data } = await supabase.from('settings').select('*');
+  const s = {}; (data||[]).forEach(row=>s[row.key]=row.value);
+  return `
+  <div class="card p-4 space-y-3">
+    <h3 class="signboard font-bold">Platform settings</h3>
+    <div><label class="text-sm font-semibold block mb-1">Zomiko name</label>
+      <input id="s_name" value="${s.zomiko_name||''}" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2"></div>
+    <div><label class="text-sm font-semibold block mb-1">UPI ID</label>
+      <input id="s_upi" value="${s.upi_id||''}" placeholder="yourname@upi" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2"></div>
+    <div><label class="text-sm font-semibold block mb-1">UPI QR image URL</label>
+      <input id="s_upiqr" value="${s.upi_qr_url||''}" placeholder="https://..." class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2"></div>
+    <div><label class="text-sm font-semibold block mb-1">Default delivery charge ₹</label>
+      <input id="s_delivery" type="number" value="${s.default_delivery_charge||0}" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2"></div>
+    <div><label class="text-sm font-semibold block mb-1">Order retention (days)</label>
+      <input id="s_retention" type="number" value="${s.order_retention_days||30}" class="w-full border-2 border-[var(--ink)] rounded-lg px-3 py-2"></div>
+    <button onclick="saveSettings()" class="btn w-full py-2">Save settings</button>
+  </div>`;
+}
+async function saveSettings(){
+  const updates = [
+    { key:'zomiko_name', value: val('s_name') },
+    { key:'upi_id', value: val('s_upi') },
+    { key:'upi_qr_url', value: val('s_upiqr') || null },
+    { key:'default_delivery_charge', value: parseFloat(val('s_delivery'))||0 },
+    { key:'order_retention_days', value: parseInt(val('s_retention'))||30 },
+  ];
+  for(const u of updates){
+    await supabase.from('settings').update({ value: u.value }).eq('key', u.key);
+  }
+  toast('Settings saved');
+}
+
+init();
+</script>
+</body>
+</html>
